@@ -1,0 +1,25 @@
+[Unit]
+Description=Laya Local Inference Service (System 1 / TypeSafe Jev)
+Documentation=https://github.com/r1cc4rd0m4zz4/laya-ctl
+After=network.target
+
+[Service]
+Type=simple
+# Ensure laya-ctl is in /usr/local/bin or ~/.local/bin
+ExecStart=/usr/local/bin/laya-ctl start --foreground
+Restart=on-failure
+RestartSec=3
+
+# Environment
+Environment=LAYA_HOST=127.0.0.1
+Environment=LAYA_PORT=5292
+Environment=LAYA_PROFILE=balanced
+
+# Security Hardening
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/laya %h/.config/laya
+
+[Install]
+WantedBy=default.target

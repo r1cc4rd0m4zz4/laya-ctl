@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.laya</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Ensure laya-ctl is in /usr/local/bin or adjust path -->
+        <string>/usr/local/bin/laya-ctl</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LAYA_HOST</key>
+        <string>127.0.0.1</string>
+        <key>LAYA_PORT</key>
+        <string>5292</string>
+        <key>LAYA_PROFILE</key>
+        <string>balanced</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/laya_launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/laya_launchd.err</string>
+</dict>
+</plist>
