@@ -87,11 +87,78 @@ PORT = int(os.environ.get("LAYA_PORT") or ENV_CONFIG.get("LAYA_PORT", "5292"))
 BASE_URL = f"http://{HOST}:{PORT}"
 
 
+def ensure_reclaimer_hook() -> str:
+    """Deploy native OS memory reclaimer (Darwin pressure relief & Linux malloc_trim)."""
+    lib_dir = os.path.join(BASE_DIR, "lib")
+    try:
+        os.makedirs(lib_dir, exist_ok=True)
+    except OSError as err:
+        logging.debug("lib_dir init: %s", err)
+    target = os.path.join(lib_dir, "sitecustomize.py")
+    hook_code = '''import gc
+import sys
+
+def release_os_memory():
+    gc.collect()
+    try:
+        import torch
+        if hasattr(torch, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+            ctypes.CDLL("libSystem.B.dylib").malloc_zone_pressure_relief(None, 0)
+        except Exception:
+            pass
+    elif sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+try:
+    from laya import router
+    orig_evict = router.Router._evict_locked
+    orig_unload = router.Router.unload
+
+    def patched_evict(self):
+        res = orig_evict(self)
+        release_os_memory()
+        return res
+
+    def patched_unload(self, name=None):
+        res = orig_unload(self, name=name)
+        release_os_memory()
+        return res
+
+    router.Router._evict_locked = patched_evict
+    router.Router.unload = patched_unload
+except Exception:
+    pass
+'''
+    try:
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(hook_code)
+    except OSError as err:
+        logging.debug("hook write: %s", err)
+    return lib_dir
+
+
 def get_resolved_env() -> dict[str, str]:
     """Merge profile defaults with explicit env and .env overrides."""
     env = os.environ.copy()
     env["LAYA_HOST"] = HOST
     env["LAYA_PORT"] = str(PORT)
+
+    lib_dir = ensure_reclaimer_hook()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{lib_dir}:{existing_pp}" if existing_pp else lib_dir
 
     for k, v in PROFILE_DEFAULTS.items():
         val = os.environ.get(k) or ENV_CONFIG.get(k) or v
