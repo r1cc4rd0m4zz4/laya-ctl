@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+# Allow running directly from bin/ or anywhere
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from laya_ctl import main
+
+if __name__ == "__main__":
+    main()
