@@ -21,6 +21,7 @@ import time
 BASE_DIR = os.path.expanduser("~/.cache/laya")
 PID_FILE = os.path.join(BASE_DIR, "laya_serve.pid")
 LOG_FILE = os.path.join(BASE_DIR, "laya_serve.log")
+HIBERNATE_SENTINEL = os.path.join(BASE_DIR, "hibernated")
 
 try:
     os.makedirs(BASE_DIR, mode=0o700, exist_ok=True)
@@ -96,7 +97,12 @@ def ensure_reclaimer_hook() -> str:
         logging.debug("lib_dir init: %s", err)
     target = os.path.join(lib_dir, "sitecustomize.py")
     hook_code = '''import gc
+import os
 import sys
+
+BASE_DIR = os.path.expanduser("~/.cache/laya")
+HIBERNATE_SENTINEL = os.path.join(BASE_DIR, "hibernated")
+PID_FILE = os.path.join(BASE_DIR, "laya_serve.pid")
 
 def release_os_memory():
     gc.collect()
@@ -135,6 +141,21 @@ try:
     def patched_unload(self, name=None):
         res = orig_unload(self, name=name)
         release_os_memory()
+
+        # If all models unloaded (idle reaper), trigger clean auto-hibernation to achieve 0.0 MB RAM!
+        auto_hib = os.environ.get("LAYA_AUTO_HIBERNATE", "1")
+        if auto_hib == "1" and name is None:
+            try:
+                if os.path.exists(PID_FILE):
+                    os.remove(PID_FILE)
+                with open(HIBERNATE_SENTINEL, "w") as f:
+                    f.write(str(os.getpid()))
+                sys.stdout.write("[+] Idle timeout reached: Auto-hibernating laya-serve to 0.0 MB RAM.\\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+            os._exit(0)
+
         return res
 
     router.Router._evict_locked = patched_evict
@@ -227,6 +248,12 @@ def service_setup() -> None:
 
 
 def service_start(foreground: bool = False) -> None:
+    if os.path.exists(HIBERNATE_SENTINEL):
+        try:
+            os.remove(HIBERNATE_SENTINEL)
+        except OSError as err:
+            logging.debug("clean sentinel: %s", err)
+
     existing_pid = get_running_pid()
     health = check_health()
     if existing_pid and health:
@@ -285,6 +312,12 @@ def service_start(foreground: bool = False) -> None:
 
 
 def service_stop() -> None:
+    if os.path.exists(HIBERNATE_SENTINEL):
+        try:
+            os.remove(HIBERNATE_SENTINEL)
+        except OSError as err:
+            logging.debug("clean sentinel: %s", err)
+
     pid = get_running_pid()
     if not pid:
         health = check_health()
@@ -326,8 +359,11 @@ def service_status() -> None:
                 mem_str = f" | RAM: {rss:.1f} MB ({rss / 1024:.2f} GB)"
         print(f"[+] laya-serve is HEALTHY ({pid_str}{mem_str}) on {BASE_URL}")
         print(f"    Profile: {ACTIVE_PROFILE} | Device: {device} | Resident Models: [{loaded}]")
+    elif os.path.exists(HIBERNATE_SENTINEL):
+        print(f"[-] laya-serve is HIBERNATED (0.0 MB RAM) on {BASE_URL}")
+        print(f"    Profile: {ACTIVE_PROFILE} | Auto-wake ready on next tool call")
     else:
-        print(f"[-] laya-serve is NOT running or unresponsive on {BASE_URL}.")
+        print(f"[-] laya-serve is NOT running on {BASE_URL}.")
         sys.exit(1)
 
 
