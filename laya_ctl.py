@@ -367,9 +367,33 @@ def service_status() -> None:
         sys.exit(1)
 
 
+def service_logs(lines: int = 30, follow: bool = False) -> None:
+    if not os.path.exists(LOG_FILE):
+        print(f"[-] No log file found at {LOG_FILE}")
+        return
+
+    if follow:
+        print(f"[*] Following {LOG_FILE} (Ctrl+C to stop)...")
+        with contextlib.suppress(KeyboardInterrupt):
+            subprocess.run(["tail", "-n", str(lines), "-f", LOG_FILE], check=False)
+    else:
+        try:
+            out = subprocess.check_output(["tail", "-n", str(lines), LOG_FILE]).decode("utf-8", errors="replace")
+            print(out, end="")
+        except Exception:
+            try:
+                with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+                    content = f.readlines()
+                    print("".join(content[-lines:]), end="")
+            except OSError as err:
+                print(f"[-] Error reading log file: {err}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Laya Universal Service Controller")
-    parser.add_argument("action", choices=["start", "stop", "restart", "status", "setup"], help="Service action")
+    parser.add_argument("action", choices=["start", "stop", "restart", "status", "setup", "logs"], help="Service action")
+    parser.add_argument("-n", "--lines", type=int, default=30, help="Number of log lines to show (default: 30)")
+    parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
     parser.add_argument("--profile", choices=["balanced", "performance", "eco"], help="Override profile (balanced|performance|eco)")
     parser.add_argument("--foreground", action="store_true", help="Run in foreground")
     args = parser.parse_args()
@@ -391,6 +415,8 @@ def main() -> None:
         service_start(foreground=args.foreground)
     elif args.action == "status":
         service_status()
+    elif args.action == "logs":
+        service_logs(lines=args.lines, follow=args.follow)
 
 
 if __name__ == "__main__":
