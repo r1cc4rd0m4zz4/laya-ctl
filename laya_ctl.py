@@ -3,7 +3,7 @@
 Laya Universal Service Controller (Linux & macOS)
 Zero-dependency controller for upstream laya-serve on loopback 127.0.0.1:5292.
 Supports balanced memory profiles, dynamic model eviction, and .env configuration.
-Adheres to AGENTS.md: Native stdlib, zero-trust loopback binding, fail-closed probes.
+Adheres to Zero-Trust Architecture: Native stdlib, loopback binding, fail-closed probes.
 """
 
 import argparse
