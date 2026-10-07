@@ -275,6 +275,9 @@ def service_start(foreground: bool = False) -> None:
 
     try:
         log_fd = open(LOG_FILE, "a", encoding="utf-8")  # noqa: SIM115
+        if sys.platform == "darwin":
+            with contextlib.suppress(Exception):
+                subprocess.run(["chflags", "uappnd", LOG_FILE], check=False)
     except OSError as e:
         print(f"[-] Failed to open log file: {e}")
         sys.exit(1)
