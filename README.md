@@ -37,6 +37,9 @@ laya-ctl start
 # Check status, active PID, RSS memory, device (MPS/CUDA/CPU), and resident models
 laya-ctl status
 
+# View daemon logs (-n lines, -f follow)
+laya-ctl logs -n 50 -f
+
 # Graceful restart
 laya-ctl restart
 
@@ -109,7 +112,8 @@ Ready-to-use production examples are provided under [`examples/`](examples/):
 
 PID and log files are stored in `~/.cache/laya/`:
 - PID file: `~/.cache/laya/laya_serve.pid`
-- Log file: `~/.cache/laya/laya_serve.log`
+- Log file: `~/.cache/laya/laya_serve.log` (protected by kernel `uappnd` flag on macOS)
+- Hibernation sentinel: `~/.cache/laya/laya_serve.hibernated` (tracks 0.0 MB RAM idle state)
 
 ---
 
