@@ -17,6 +17,9 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Final
+
+MIN_LAYA_VERSION: Final[str] = "0.4.20"
 
 BASE_DIR = os.path.expanduser("~/.cache/laya")
 PID_FILE = os.path.join(BASE_DIR, "laya_serve.pid")
@@ -86,6 +89,88 @@ PROFILE_DEFAULTS = PROFILES.get(ACTIVE_PROFILE, PROFILES["balanced"])
 HOST = os.environ.get("LAYA_HOST") or ENV_CONFIG.get("LAYA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LAYA_PORT") or ENV_CONFIG.get("LAYA_PORT", "5292"))
 BASE_URL = f"http://{HOST}:{PORT}"
+
+
+def parse_version_tuple(v_str: str) -> tuple[int, ...]:
+    """Extract numeric components from a SemVer string like '0.4.21' or '0.4.20.post1'."""
+    clean = v_str.strip().split("+")[0].split("-")[0]
+    parts: list[int] = []
+    for segment in clean.split("."):
+        digits = ""
+        for ch in segment:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits:
+            parts.append(int(digits))
+        else:
+            break
+    return tuple(parts)
+
+
+def get_installed_laya_version() -> str | None:
+    """
+    Resolve the installed version of upstream laya.
+    Inspects companion python in PATH or laya-serve companion environment.
+    """
+    bin_path = shutil.which("laya-serve")
+    interpreter = sys.executable
+    if bin_path:
+        try:
+            with open(bin_path, "r", encoding="utf-8", errors="ignore") as f:
+                first_line = f.readline().strip()
+                if first_line.startswith("#!"):
+                    candidate = first_line[2:].strip().split()[0]
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        interpreter = candidate
+        except OSError:
+            pass
+
+    try:
+        out = subprocess.check_output(
+            [interpreter, "-c", "import importlib.metadata; print(importlib.metadata.version('laya'))"],
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+        ).decode("utf-8").strip()
+        if out:
+            return out
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("laya")
+    except Exception:
+        return None
+
+
+def probe_laya_compatibility() -> tuple[bool, str | None, str]:
+    """
+    Verify if upstream laya satisfies MIN_LAYA_VERSION.
+    Returns (compatible: bool, installed_version: str | None, diagnostic_msg: str).
+    """
+    bin_path = shutil.which("laya-serve")
+    if not bin_path:
+        return (False, None, f"'laya-serve' binary not found in PATH. Run 'laya-ctl setup' to install laya >= {MIN_LAYA_VERSION}.")
+
+    ver = get_installed_laya_version()
+    if not ver:
+        return (False, None, "laya-serve binary found, but unable to detect laya package version.")
+
+    current_tuple = parse_version_tuple(ver)
+    min_tuple = parse_version_tuple(MIN_LAYA_VERSION)
+
+    if current_tuple < min_tuple:
+        return (
+            False,
+            ver,
+            f"laya version '{ver}' is below minimum recommended '{MIN_LAYA_VERSION}'. "
+            f"TypeSafe /v1/systemone routing and dynamic eviction may fail. "
+            f"Run 'laya-ctl setup' to upgrade.",
+        )
+
+    return (True, ver, f"laya version '{ver}' is fully compatible.")
 
 
 def ensure_reclaimer_hook() -> str:
@@ -160,8 +245,9 @@ try:
 
     router.Router._evict_locked = patched_evict
     router.Router.unload = patched_unload
-except Exception:
-    pass
+except Exception as hook_err:
+    sys.stderr.write(f"[!] Warning: laya-ctl memory hook could not patch router: {hook_err}\\n")
+    sys.stderr.flush()
 '''
     try:
         with open(target, "w", encoding="utf-8") as f:
@@ -171,11 +257,17 @@ except Exception:
     return lib_dir
 
 
-def get_resolved_env() -> dict[str, str]:
+def get_resolved_env(strict: bool = False) -> dict[str, str]:
     """Merge profile defaults with explicit env and .env overrides."""
     env = os.environ.copy()
+    # Propagate all variables configured in .env
+    env.update(ENV_CONFIG)
+
     env["LAYA_HOST"] = HOST
     env["LAYA_PORT"] = str(PORT)
+
+    if strict or env.get("LAYA_JEV_STRICT") == "1":
+        env["LAYA_JEV_STRICT"] = "1"
 
     lib_dir = ensure_reclaimer_hook()
     existing_pp = env.get("PYTHONPATH", "")
@@ -227,27 +319,28 @@ def get_rss_mb(pid: int) -> float | None:
 
 
 def service_setup() -> None:
-    """Convenience installer for upstream laya[serve,mcp]."""
-    print("[*] Setting up upstream laya with serve and mcp extras...")
+    """Convenience installer for upstream laya[serve,mcp] with pinned minimum version."""
+    target_pkg = f"laya[serve,mcp]>={MIN_LAYA_VERSION}"
+    print(f"[*] Setting up upstream {target_pkg}...")
     if shutil.which("uv"):
-        cmd = ["uv", "tool", "install", "--force", "laya[serve,mcp]"]
+        cmd = ["uv", "tool", "install", "--force", target_pkg]
         print(f"[*] Running: {' '.join(cmd)}")
         res = subprocess.run(cmd, check=False)
         if res.returncode == 0:
-            print("[+] Successfully installed laya via uv tool.")
+            print(f"[+] Successfully installed {target_pkg} via uv tool.")
             return
 
-    cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "laya[serve,mcp]"]
+    cmd = [sys.executable, "-m", "pip", "install", "--upgrade", target_pkg]
     print(f"[*] Running: {' '.join(cmd)}")
     res = subprocess.run(cmd, check=False)
     if res.returncode == 0:
-        print("[+] Successfully installed laya via pip.")
+        print(f"[+] Successfully installed {target_pkg} via pip.")
     else:
-        print("[-] Failed to install laya. Please install manually: uv tool install 'laya[serve,mcp]'")
+        print(f"[-] Failed to install {target_pkg}. Please install manually: uv tool install '{target_pkg}'")
         sys.exit(1)
 
 
-def service_start(foreground: bool = False) -> None:
+def service_start(foreground: bool = False, strict: bool = False) -> None:
     if os.path.exists(HIBERNATE_SENTINEL):
         try:
             os.remove(HIBERNATE_SENTINEL)
@@ -260,12 +353,25 @@ def service_start(foreground: bool = False) -> None:
         print(f"[-] laya-serve is already running (PID: {existing_pid}, Device: {health.get('device')}).")
         return
 
-    env = get_resolved_env()
+    # Pre-flight binary existence probe
+    if not shutil.which("laya-serve"):
+        print("[-] Error: 'laya-serve' binary not found in PATH.")
+        print(f"    Please install upstream laya first by running: laya-ctl setup (requires laya >= {MIN_LAYA_VERSION})")
+        sys.exit(1)
+
+    # Pre-flight compatibility probe (Q1: B - Pragmatic Fail-Open with loud warning)
+    compatible, installed_ver, diag_msg = probe_laya_compatibility()
+    if not compatible:
+        print(f"[!] Pre-flight Warning: {diag_msg}")
+
+    env = get_resolved_env(strict=strict)
     preload_models = env.get("LAYA_MODELS", "(all)")
     max_resident = env.get("LAYA_MAX_LOADED", "2")
     idle_unload = env.get("LAYA_IDLE_UNLOAD_SECONDS", "0")
+    strict_mode = "ENABLED (strict Jev wire)" if env.get("LAYA_JEV_STRICT") == "1" else "disabled"
+    ver_str = f" | Laya: v{installed_ver}" if installed_ver else ""
 
-    print(f"[*] Profile: '{ACTIVE_PROFILE}' | Preload: [{preload_models}] | Max Resident: {max_resident} | Idle Unload: {idle_unload}s")
+    print(f"[*] Profile: '{ACTIVE_PROFILE}'{ver_str} | Preload: [{preload_models}] | Max Resident: {max_resident} | Idle Unload: {idle_unload}s | Strict: {strict_mode}")
 
     if foreground:
         print(f"[*] Starting laya-serve on {BASE_URL} in foreground...")
@@ -351,6 +457,7 @@ def service_stop() -> None:
 def service_status() -> None:
     pid = get_running_pid()
     health = check_health()
+    installed_ver = get_installed_laya_version() or "unknown"
     if health and health.get("status") == "ok":
         loaded = ", ".join(health.get("loaded", [])) or "none (lazy)"
         device = health.get("device", "unknown")
@@ -361,12 +468,12 @@ def service_status() -> None:
             if rss:
                 mem_str = f" | RAM: {rss:.1f} MB ({rss / 1024:.2f} GB)"
         print(f"[+] laya-serve is HEALTHY ({pid_str}{mem_str}) on {BASE_URL}")
-        print(f"    Profile: {ACTIVE_PROFILE} | Device: {device} | Resident Models: [{loaded}]")
+        print(f"    Profile: {ACTIVE_PROFILE} | Device: {device} | Laya: v{installed_ver} | Resident Models: [{loaded}]")
     elif os.path.exists(HIBERNATE_SENTINEL):
         print(f"[-] laya-serve is HIBERNATED (0.0 MB RAM) on {BASE_URL}")
-        print(f"    Profile: {ACTIVE_PROFILE} | Auto-wake ready on next tool call")
+        print(f"    Profile: {ACTIVE_PROFILE} | Laya: v{installed_ver} | Auto-wake ready on next tool call")
     else:
-        print(f"[-] laya-serve is NOT running on {BASE_URL}.")
+        print(f"[-] laya-serve is NOT running on {BASE_URL} (detected laya: v{installed_ver}).")
         sys.exit(1)
 
 
@@ -399,6 +506,7 @@ def main() -> None:
     parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
     parser.add_argument("--profile", choices=["balanced", "performance", "eco"], help="Override profile (balanced|performance|eco)")
     parser.add_argument("--foreground", action="store_true", help="Run in foreground")
+    parser.add_argument("--strict", action="store_true", help="Enforce strict TypeSafe Jev wire contract (LAYA_JEV_STRICT=1)")
     args = parser.parse_args()
 
     global ACTIVE_PROFILE, PROFILE_DEFAULTS
@@ -409,13 +517,13 @@ def main() -> None:
     if args.action == "setup":
         service_setup()
     elif args.action == "start":
-        service_start(foreground=args.foreground)
+        service_start(foreground=args.foreground, strict=args.strict)
     elif args.action == "stop":
         service_stop()
     elif args.action == "restart":
         service_stop()
         time.sleep(1)
-        service_start(foreground=args.foreground)
+        service_start(foreground=args.foreground, strict=args.strict)
     elif args.action == "status":
         service_status()
     elif args.action == "logs":

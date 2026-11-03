@@ -6,6 +6,14 @@
 
 ---
 
+## System Requirements
+
+- **Python**: `>= 3.11`
+- **Upstream Engine**: [`laya[serve,mcp] >= 0.4.20`](https://github.com/NandhaKishorM/laya) (automatically installed via `laya-ctl setup`)
+- **OS**: Linux (x86_64/aarch64) or macOS (Apple Silicon MPS / Intel)
+
+---
+
 ## Installation
 
 ### Option 1: Direct Executable (Zero Dependencies)
@@ -109,6 +117,29 @@ Ready-to-use production examples are provided under [`examples/`](examples/):
 | `LAYA_DEVICE` | `auto` | PyTorch device preference (`mps`, `cuda`, `cpu`) |
 | `LAYA_MAX_LOADED` | `2` (in balanced) | Maximum checkpoints resident in RAM simultaneously |
 | `LAYA_IDLE_UNLOAD_SECONDS` | `300` | Inactivity seconds before resident models are evicted |
+| `LAYA_JEV_STRICT` | `0` | Enforce strict byte-for-byte TypeSafe Jev wire compatibility (or `--strict`) |
+| `LAYA_API_KEY` | *(empty)* | Optional Bearer token check for zero-trust loopback protection |
+
+### TypeSafe Jev & LiteLLM Integration
+
+`laya-serve` implements the TypeSafe Jev `/v1/systemone` wire protocol, enabling seamless interoperability with **LiteLLM**:
+
+- **LiteLLM Proxy (`config.yaml`)**:
+  ```yaml
+  model_list:
+    - model_name: laya-decider
+      litellm_params:
+        model: typesafe/laya
+        api_base: http://127.0.0.1:5292
+  ```
+
+- **Strict Wire Compatibility**:
+  To strip Laya extensions and ensure 100% canonical Jev schemas:
+  ```bash
+  laya-ctl start --strict
+  # or
+  LAYA_JEV_STRICT=1 laya-ctl start
+  ```
 
 PID and log files are stored in `~/.cache/laya/`:
 - PID file: `~/.cache/laya/laya_serve.pid`
