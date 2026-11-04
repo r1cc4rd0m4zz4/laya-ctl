@@ -3,7 +3,7 @@
 Laya Universal Service Controller (Linux & macOS)
 Zero-dependency controller for upstream laya-serve on loopback 127.0.0.1:5292.
 Supports balanced memory profiles, dynamic model eviction, and .env configuration.
-Adheres to Zero-Trust Architecture: Native stdlib, loopback binding, fail-closed probes.
+Adheres to Zero-Trust Architecture: Native stdlib, loopback binding, explicit pre-flight diagnostics.
 """
 
 import argparse
@@ -24,7 +24,6 @@ MIN_LAYA_VERSION: Final[str] = "0.4.20"
 BASE_DIR = os.path.expanduser("~/.cache/laya")
 PID_FILE = os.path.join(BASE_DIR, "laya_serve.pid")
 LOG_FILE = os.path.join(BASE_DIR, "laya_serve.log")
-HIBERNATE_SENTINEL = os.path.join(BASE_DIR, "hibernated")
 
 try:
     os.makedirs(BASE_DIR, mode=0o700, exist_ok=True)
@@ -84,11 +83,19 @@ PROFILES = {
 }
 
 ACTIVE_PROFILE = os.environ.get("LAYA_PROFILE") or ENV_CONFIG.get("LAYA_PROFILE", "balanced")
-PROFILE_DEFAULTS = PROFILES.get(ACTIVE_PROFILE, PROFILES["balanced"])
+if ACTIVE_PROFILE not in PROFILES:
+    sys.stderr.write(f"[!] Warning: unknown LAYA_PROFILE '{ACTIVE_PROFILE}', using 'balanced' (valid: {', '.join(PROFILES)}).\n")
+    ACTIVE_PROFILE = "balanced"
+PROFILE_DEFAULTS = PROFILES[ACTIVE_PROFILE]
 
 HOST = os.environ.get("LAYA_HOST") or ENV_CONFIG.get("LAYA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LAYA_PORT") or ENV_CONFIG.get("LAYA_PORT", "5292"))
 BASE_URL = f"http://{HOST}:{PORT}"
+
+
+def is_enabled(value: str | None) -> bool:
+    """Same truthiness as laya-serve for LAYA_* switches: only 1/true/yes/on enable, blank means off."""
+    return value is not None and value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def parse_version_tuple(v_str: str) -> tuple[int, ...]:
@@ -182,12 +189,7 @@ def ensure_reclaimer_hook() -> str:
         logging.debug("lib_dir init: %s", err)
     target = os.path.join(lib_dir, "sitecustomize.py")
     hook_code = '''import gc
-import os
 import sys
-
-BASE_DIR = os.path.expanduser("~/.cache/laya")
-HIBERNATE_SENTINEL = os.path.join(BASE_DIR, "hibernated")
-PID_FILE = os.path.join(BASE_DIR, "laya_serve.pid")
 
 def release_os_memory():
     gc.collect()
@@ -226,21 +228,6 @@ try:
     def patched_unload(self, name=None):
         res = orig_unload(self, name=name)
         release_os_memory()
-
-        # If all models unloaded (idle reaper), trigger clean auto-hibernation to achieve 0.0 MB RAM!
-        auto_hib = os.environ.get("LAYA_AUTO_HIBERNATE", "1")
-        if auto_hib == "1" and name is None:
-            try:
-                if os.path.exists(PID_FILE):
-                    os.remove(PID_FILE)
-                with open(HIBERNATE_SENTINEL, "w") as f:
-                    f.write(str(os.getpid()))
-                sys.stdout.write("[+] Idle timeout reached: Auto-hibernating laya-serve to 0.0 MB RAM.\\n")
-                sys.stdout.flush()
-            except Exception:
-                pass
-            os._exit(0)
-
         return res
 
     router.Router._evict_locked = patched_evict
@@ -258,15 +245,23 @@ except Exception as hook_err:
 
 
 def get_resolved_env(strict: bool = False) -> dict[str, str]:
-    """Merge profile defaults with explicit env and .env overrides."""
-    env = os.environ.copy()
-    # Propagate all variables configured in .env
-    env.update(ENV_CONFIG)
+    """Merge profile defaults, .env and the shell environment.
+
+    Precedence (highest first): --strict flag, shell environment, .env file, profile defaults.
+    Only LAYA_* keys are taken from .env: a .env found in the working directory must not be able to
+    inject PATH, PYTHONPATH, LD_PRELOAD or DYLD_* into the spawned process.
+    """
+    env = {k: v for k, v in ENV_CONFIG.items() if k.startswith("LAYA_")}
+    env.update(os.environ)
 
     env["LAYA_HOST"] = HOST
     env["LAYA_PORT"] = str(PORT)
 
-    if strict or env.get("LAYA_JEV_STRICT") == "1":
+    # laya-serve validates LAYA_DEVICE with torch.device(); 'auto' or empty must be unset for auto-detection
+    if env.get("LAYA_DEVICE", "").strip().lower() in ("auto", ""):
+        env.pop("LAYA_DEVICE", None)
+
+    if strict or is_enabled(env.get("LAYA_JEV_STRICT")):
         env["LAYA_JEV_STRICT"] = "1"
 
     lib_dir = ensure_reclaimer_hook()
@@ -341,12 +336,6 @@ def service_setup() -> None:
 
 
 def service_start(foreground: bool = False, strict: bool = False) -> None:
-    if os.path.exists(HIBERNATE_SENTINEL):
-        try:
-            os.remove(HIBERNATE_SENTINEL)
-        except OSError as err:
-            logging.debug("clean sentinel: %s", err)
-
     existing_pid = get_running_pid()
     health = check_health()
     if existing_pid and health:
@@ -368,7 +357,7 @@ def service_start(foreground: bool = False, strict: bool = False) -> None:
     preload_models = env.get("LAYA_MODELS", "(all)")
     max_resident = env.get("LAYA_MAX_LOADED", "2")
     idle_unload = env.get("LAYA_IDLE_UNLOAD_SECONDS", "0")
-    strict_mode = "ENABLED (strict Jev wire)" if env.get("LAYA_JEV_STRICT") == "1" else "disabled"
+    strict_mode = "ENABLED (strict Jev wire)" if is_enabled(env.get("LAYA_JEV_STRICT")) else "disabled"
     ver_str = f" | Laya: v{installed_ver}" if installed_ver else ""
 
     print(f"[*] Profile: '{ACTIVE_PROFILE}'{ver_str} | Preload: [{preload_models}] | Max Resident: {max_resident} | Idle Unload: {idle_unload}s | Strict: {strict_mode}")
@@ -421,12 +410,6 @@ def service_start(foreground: bool = False, strict: bool = False) -> None:
 
 
 def service_stop() -> None:
-    if os.path.exists(HIBERNATE_SENTINEL):
-        try:
-            os.remove(HIBERNATE_SENTINEL)
-        except OSError as err:
-            logging.debug("clean sentinel: %s", err)
-
     pid = get_running_pid()
     if not pid:
         health = check_health()
@@ -459,7 +442,12 @@ def service_status() -> None:
     health = check_health()
     installed_ver = get_installed_laya_version() or "unknown"
     if health and health.get("status") == "ok":
-        loaded = ", ".join(health.get("loaded", [])) or "none (lazy)"
+        loaded_list = health.get("loaded")
+        if loaded_list is None:
+            # With LAYA_API_KEY set, an unauthenticated /health answers liveness only.
+            loaded = "hidden (liveness only: /health details require the API key)"
+        else:
+            loaded = ", ".join(loaded_list) or "none (idle: models reload on next request)"
         device = health.get("device", "unknown")
         pid_str = f"PID: {pid}" if pid else "PID: external"
         mem_str = ""
@@ -469,11 +457,8 @@ def service_status() -> None:
                 mem_str = f" | RAM: {rss:.1f} MB ({rss / 1024:.2f} GB)"
         print(f"[+] laya-serve is HEALTHY ({pid_str}{mem_str}) on {BASE_URL}")
         print(f"    Profile: {ACTIVE_PROFILE} | Device: {device} | Laya: v{installed_ver} | Resident Models: [{loaded}]")
-    elif os.path.exists(HIBERNATE_SENTINEL):
-        print(f"[-] laya-serve is HIBERNATED (0.0 MB RAM) on {BASE_URL}")
-        print(f"    Profile: {ACTIVE_PROFILE} | Laya: v{installed_ver} | Auto-wake ready on next tool call")
     else:
-        print(f"[-] laya-serve is NOT running on {BASE_URL} (detected laya: v{installed_ver}).")
+        print(f"[-] laya-serve is NOT running on {BASE_URL} (detected laya: v{installed_ver}). Run 'laya-ctl start'.")
         sys.exit(1)
 
 
@@ -512,7 +497,7 @@ def main() -> None:
     global ACTIVE_PROFILE, PROFILE_DEFAULTS
     if args.profile:
         ACTIVE_PROFILE = args.profile
-        PROFILE_DEFAULTS = PROFILES.get(ACTIVE_PROFILE, PROFILES["balanced"])
+        PROFILE_DEFAULTS = PROFILES[ACTIVE_PROFILE]
 
     if args.action == "setup":
         service_setup()

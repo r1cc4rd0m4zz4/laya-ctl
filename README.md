@@ -114,9 +114,9 @@ Ready-to-use production examples are provided under [`examples/`](examples/):
 | `LAYA_PROFILE` | `balanced` | Memory preset: `balanced`, `performance`, or `eco` |
 | `LAYA_HOST` | `127.0.0.1` | Loopback socket interface |
 | `LAYA_PORT` | `5292` | TCP listening port |
-| `LAYA_DEVICE` | `auto` | PyTorch device preference (`mps`, `cuda`, `cpu`) |
+| `LAYA_DEVICE` | *(unset: auto)* | PyTorch device preference (`mps`, `cuda`, `cpu`) |
 | `LAYA_MAX_LOADED` | `2` (in balanced) | Maximum checkpoints resident in RAM simultaneously |
-| `LAYA_IDLE_UNLOAD_SECONDS` | `300` | Inactivity seconds before resident models are evicted |
+| `LAYA_IDLE_UNLOAD_SECONDS` | `300` | Inactivity seconds before `laya-serve` unloads resident models (`0` = never). The process stays up and reloads on the next request |
 | `LAYA_JEV_STRICT` | `0` | Enforce strict byte-for-byte TypeSafe Jev wire compatibility (or `--strict`) |
 | `LAYA_API_KEY` | *(empty)* | Optional Bearer token check for zero-trust loopback protection |
 
@@ -144,7 +144,15 @@ Ready-to-use production examples are provided under [`examples/`](examples/):
 PID and log files are stored in `~/.cache/laya/`:
 - PID file: `~/.cache/laya/laya_serve.pid`
 - Log file: `~/.cache/laya/laya_serve.log` (protected by kernel `uappnd` flag on macOS)
-- Hibernation sentinel: `~/.cache/laya/laya_serve.hibernated` (tracks 0.0 MB RAM idle state)
+
+### Idle Behavior
+
+The idle timeout is driven entirely by `laya-serve` through `LAYA_IDLE_UNLOAD_SECONDS` (`0` disables it); `laya-ctl` only sets the value per profile.
+
+After the idle window, `laya-serve` unloads the resident checkpoints **but keeps running and keeps listening on its TCP port**. The next request to `/v1/systemone` reloads the needed checkpoint transparently (the first request after an idle period is slower), so no restart or wake-up step is ever required. `laya-ctl status` reports this state as `Resident Models: [none (idle: ...)]`.
+
+> [!NOTE]
+> Unloading frees the model weights, not the Python/PyTorch runtime. In a measurement on Apple Silicon (MPS, `balanced` profile) the process went from ~1.1 GB to ~0.8 GB RSS while idle. It does not drop to 0 MB.
 
 ---
 
